@@ -2891,7 +2891,7 @@ if(typeof accTab!=='undefined'&&accTab!=='signup')accTab='login';
 /* trocar senha no perfil */
 (function(){const _a=accountPage;accountPage=function(){let h=_a.apply(this,arguments);if(!custUser())return h;
  return h.replace(/<section class="panel"><h3>🔐 Acesso e segurança<\/h3>[\s\S]*?<\/section><\/div>/,`<section class="panel"><h3>🔐 Senha e segurança</h3><p class="tiny">Você entra com seu WhatsApp e senha. Se esquecer, use “Esqueci minha senha” e entre com um código no celular.</p><form id="custPassForm" class="stack"><label class="field">Senha nova (mín. 6)<input name="p1" type="password" minlength="6" required autocomplete="new-password"></label><label class="field">Repita a senha nova<input name="p2" type="password" minlength="6" required autocomplete="new-password"></label><button class="button small" type="submit">Trocar senha</button></form><p class="tiny muted" style="margin-top:8px">📱 Para trocar o número do WhatsApp, fale com a K10.</p></section></div>`)}})();
-window.addEventListener('submit',e=>{const f=e.target;if(!f||f.id!=='custPassForm')return;e.preventDefault();e.stopImmediatePropagation();const c=custUser();if(!c)return;const a=f.p1.value.trim(),b=f.p2.value.trim();
+window.addEventListener('submit',e=>{const f=e.target;if(!f||f.id!=='custPassForm'||window.K10_ONLINE)return;e.preventDefault();e.stopImmediatePropagation();const c=custUser();if(!c)return;const a=f.p1.value.trim(),b=f.p2.value.trim();
  if(a.length<6){toast('A senha precisa ter pelo menos 6 caracteres.',true);return}if(a!==b){toast('As duas senhas não são iguais.',true);return}c.passHash=hashPass(digits(c.phone),a);save();f.reset();toast('Senha trocada!')},true);
 document.addEventListener('click',e=>{if(e.target.closest&&e.target.closest('[data-action=cust-logout]'))accTab='login'},true);
 /* v41 · excluir conta só em Configurações → Segurança da conta → Excluir → confirmar */
@@ -2964,6 +2964,7 @@ if((window.K10_MODE||'')==='equipe'){
  document.addEventListener('click',e=>{const t=e.target.closest&&e.target.closest('[data-action=acc-home]');if(!t)return;e.preventDefault();e.stopImmediatePropagation();
   try{otp=null;custPhoneStep='phone';otpPhone=''}catch(x){}try{delete drafts.custSignupForm;delete drafts.otpProfileForm}catch(x){}accTab='login';render();window.scrollTo(0,0)},true)})();
 
+/* v46 · contas dos clientes e aba Clientes ligadas à tabela k10_clientes */
 /* v45 · banco de dados online (Supabase). Sem k10-config.js o app continua em modo prévia (só neste aparelho). */
 (function(){
 const CFG=window.K10_SB||{};
@@ -3020,10 +3021,76 @@ if(!STAFF){
  setInterval(()=>{if(document.visibilityState==='visible')pullVitrine()},90000);
  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){pullVitrine();pollStatus()}});
  window.addEventListener('online',sendQueue);
+ /* v46 · contas dos clientes no banco online (tabela k10_clientes) */
+ const TK='k10-cli-tok';
+ const tok=()=>LS.get(TK,null);
+ const rpc=(fn,body)=>rest('rpc/'+fn,{method:'POST',body,anon:true});
+ const ckey=c=>{const d=clone(c||{});delete d.passHash;delete d._sb;delete d.ledger;return canon(d)};
+ const netMsg=e=>e&&e.message==='Failed to fetch'?'Sem internet. Tente de novo.':(e&&e.message)||'Erro.';
+ let sentKey='',cliT=0,lastRef=0,busyAcc=false;
+ function putLocal(d){const ph=digits(d.phone);DB.customers=(DB.customers||[]).filter(x=>x.id===d.id||!(x.account&&digits(x.phone)===ph));
+  let c=DB.customers.find(x=>x.id===d.id);const n=Object.assign({ledger:[]},d,{account:true});delete n.passHash;
+  if(c){for(const k of Object.keys(c))delete c[k];Object.assign(c,n)}else{c=n;DB.customers.push(c)}return c}
+ function dropSession(msg){const t=tok();LS.set(TK,null);const c=custUser();if(c)DB.customers=DB.customers.filter(x=>x.id!==c.id);DB.customerSession=null;
+  for(const o of DB.orders||[])delete o._tok;save();if(msg){toast(msg,true);softRender()}return t}
+ const ts=s=>{const m=String(s||'').match(/(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/);return m?Date.UTC(+m[3],m[2]-1,+m[1],+m[4],+m[5],+(m[6]||0)):0};
+ async function pullMine(){const t=tok();if(!t)return;try{const list=await rpc('k10_cliente_pedidos',{tok:t});if(!Array.isArray(list)||!list.length)return;let n=0;
+  for(const d of list){if(!d||!d.id)continue;const loc=DB.orders.find(o=>o.id===d.id);if(loc){if(loc.status!==d.status){loc.status=d.status;n++}continue}d._sb='ok';delete d._tok;DB.orders.push(d);n++}
+  if(n){DB.orders.sort((a,b)=>ts(b.created)-ts(a.created));save();softRender()}}catch(e){console.warn('pedidos',e.message)}}
+ async function refreshMe(){const t=tok();if(!t)return;lastRef=Date.now();try{const r=await rpc('k10_cliente_dados',{tok:t});
+  if(r&&r.erro){if(/expirada/i.test(r.erro))dropSession('Sua sessão expirou. Entre de novo na sua conta.');return}
+  if(r&&r.dados){const c=putLocal(r.dados);DB.customerSession=c.id;sentKey=ckey(c);save();softRender()}}catch(e){console.warn('conta',e.message)}}
+ async function syncMe(){const c=custUser(),t=tok();if(!c||!t)return;const j=ckey(c);if(j===sentKey)return;const d=clone(c);delete d.passHash;delete d._sb;
+  try{const r=await rpc('k10_cliente_salvar',{tok:t,p:d});if(r&&r.erro){if(/expirada/i.test(r.erro))dropSession('Sua sessão expirou. Entre de novo para salvar seus dados.');else toast(r.erro,true);return}sentKey=j}
+  catch(e){console.warn('conta',e.message);clearTimeout(cliT);cliT=setTimeout(syncMe,20000)}}
+ const _svC=save;save=function(){const r=_svC.apply(this,arguments);clearTimeout(cliT);cliT=setTimeout(syncMe,1200);return r};
+ /* o pedido de quem está logado vai ligado à conta */
+ const _sellT=sell;sell=function(o){const order=_sellT.apply(this,arguments);try{const t=tok();if(order&&o&&o.origin==='site'&&t&&custUser())order._tok=t}catch(e){}return order};
+ function cliPayload(c){return {id:c.id,name:c.name,doc:digits(c.doc),phone:c.phone,street:c.street||'',number:c.number||'',neighborhood:c.neighborhood||'',reference:c.reference||''}}
+ function loginOk(r,msg){LS.set(TK,r.token);const c=putLocal(r.dados);DB.customerSession=c.id;sentKey=ckey(c);try{delete drafts.custSignupForm;delete drafts.custLoginForm}catch(e){}
+  save();go('account');toast(msg);setTimeout(pullMine,300)}
+ /* criar conta, entrar e trocar senha: tudo pelo banco */
+ window.addEventListener('submit',async e=>{const f=e.target;if(!f||!['custSignupForm','custLoginForm','custPassForm'].includes(f.id))return;e.preventDefault();e.stopImmediatePropagation();if(busyAcc)return;
+  const fd=new FormData(f),g=k=>String(fd.get(k)||'').trim();const btn=f.querySelector('button[type=submit]'),label=btn&&btn.textContent;
+  busyAcc=true;if(btn){btn.disabled=true;btn.textContent='Aguarde…'}
+  try{
+   if(f.id==='custSignupForm'){const name=g('name'),doc=digits(g('doc')),phone=g('phone'),pass=g('pass');
+    if(name.length<5)throw Error('Informe o nome completo.');if(!(validCPF(doc)||validCNPJ(doc)))throw Error('CPF ou CNPJ inválido.');
+    if(ageOf(g('birth'))<18)throw Error('O cadastro é permitido somente para maiores de 18 anos.');if(digits(phone).length<10)throw Error('WhatsApp inválido (com DDD).');
+    if(pass.length<6)throw Error('A senha precisa ter pelo menos 6 caracteres.');if(pass!==g('pass2'))throw Error('As senhas não conferem.');if(!fd.get('lgpd'))throw Error('Autorize o uso dos dados para continuar.');
+    const prev=(DB.customers||[]).find(x=>!x.account&&digits(x.phone)===digits(phone));
+    const r=await rpc('k10_cliente_cadastrar',{p:{id:prev?prev.id:undefined,name,doc,phone,street:g('street'),number:g('number'),neighborhood:g('neighborhood'),reference:g('reference')},senha:pass});
+    if(!r||r.erro)throw Error((r&&r.erro)||'Não foi possível criar a conta.');
+    loginOk(r,'Cadastro criado! Seu número de cliente é '+r.code+'.');return}
+   if(f.id==='custLoginForm'){const ph=digits(g('phone')),pw=g('pass');if(ph.length<10)throw Error('Informe o WhatsApp com DDD.');if(!pw)throw Error('Informe a senha.');
+    let r=await rpc('k10_cliente_entrar',{telefone:ph,senha:pw});
+    /* conta antiga, que ficou só neste aparelho: sobe para o banco */
+    if(r&&r.erro&&/incorretos/i.test(r.erro)){const old=(DB.customers||[]).find(x=>x.account&&x.passHash&&digits(x.phone)===ph&&x.passHash===hashPass(ph,pw));
+     if(old){const r2=await rpc('k10_cliente_cadastrar',{p:cliPayload(old),senha:pw});if(r2&&!r2.erro)r=r2}}
+    if(!r||r.erro)throw Error((r&&r.erro)||'Não foi possível entrar.');
+    loginOk(r,'Olá, '+firstName(r.dados&&r.dados.name)+'!');return}
+   if(f.id==='custPassForm'){const t=tok();if(!t||!custUser())throw Error('Entre na sua conta de novo.');
+    const a=String(f.querySelector('[name=p1]').value||'').trim(),b=String(f.querySelector('[name=p2]').value||'').trim();
+    if(a.length<6)throw Error('A senha precisa ter pelo menos 6 caracteres.');if(a!==b)throw Error('As duas senhas não são iguais.');
+    const r=await rpc('k10_cliente_senha',{tok:t,nova:a});if(r&&r.erro)throw Error(r.erro);f.reset();toast('Senha trocada!');return}
+  }catch(err){toast(netMsg(err),true)}finally{busyAcc=false;if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=label}}},true);
+ /* sair */
+ window.addEventListener('click',e=>{if(!(e.target.closest&&e.target.closest('[data-action=cust-logout]')))return;const t=dropSession();if(t)rpc('k10_cliente_sair',{tok:t}).catch(()=>{})},true);
+ /* excluir conta: apaga no banco */
+ window.addEventListener('click',async e=>{const b=e.target.closest&&e.target.closest('[data-del="ok"]');if(!b)return;const t=tok();if(!t)return;e.preventDefault();e.stopImmediatePropagation();
+  const w=document.getElementById('delWord');if(!w||w.value.trim().toUpperCase()!=='EXCLUIR'){toast('Digite EXCLUIR para confirmar.',true);w&&w.focus();return}
+  b.disabled=true;try{const r=await rpc('k10_cliente_excluir',{tok:t});if(r&&r.erro)throw Error(r.erro);dropSession();accView='main';delStep=0;accTab='login';save();go('home');toast('Conta excluída.')}
+  catch(err){b.disabled=false;toast(netMsg(err),true)}},true);
+ /* esqueci a senha: a K10 cria uma nova pelo portal */
+ window.addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-action=acc-tab][data-value=otp]');if(!b)return;e.preventDefault();e.stopImmediatePropagation();
+  const wa='https://wa.me/55'+digits(DB.settings.whatsapp||'')+'?text='+encodeURIComponent('Olá! Esqueci a senha da minha conta K10. Meu nome é ');
+  popup('Esqueci minha senha',`<p class="page-summary">Chame a K10 no WhatsApp com seu nome completo e CPF. A K10 confere seus dados e cria uma senha nova para você entrar.</p><div class="form-actions"><a class="button block" href="${wa}" target="_blank" rel="noopener">💬 Chamar a K10 no WhatsApp</a></div>`)},true);
+ setTimeout(()=>{if(tok()){refreshMe().then(pullMine)}else if(custUser()){DB.customerSession=null;save();softRender();toast('Atualizamos o app da K10: entre de novo com seu WhatsApp e senha.')}},400);
+ document.addEventListener('visibilitychange',()=>{if(document.visibilityState!=='visible'||!tok()||Date.now()-lastRef<60000)return;const c=custUser();if(c&&ckey(c)!==sentKey)syncMe();else refreshMe()});
  return}
 
 /* ================= EQUIPE ================= */
-const EKEYS=['settings','transfers','stockEvents','counts','debts','expenses','k11Sales','customers','shifts','tabs','fiscal','fiscalSeq'];
+const EKEYS=['settings','transfers','stockEvents','counts','debts','expenses','k11Sales','shifts','tabs','fiscal','fiscalSeq'];
 let SNAP=null,running=false,pushT=0,pullT=0,lastCat='',lastOrd='',pushing=false,role=null;
 const isAdmin=()=>role==='admin';
 function curMaps(){const m={c:{},o:{},e:{}};for(const p of DB.products)m.c['p:'+p.id]=rowOf(p,'p');for(const c of DB.combos)m.c['c:'+c.id]=rowOf(c,'c');for(const o of DB.orders)m.o[o.id]=o;for(const k of EKEYS)if(DB[k]!==undefined)m.e[k]=DB[k];return m}
@@ -3039,6 +3106,7 @@ async function initialSync(){
  DB.orders=ords.map(r=>{const o=r.dados;o.id=r.id;return o});for(const r of ords)SNAP.o[r.id]=canon(orderRow(r.dados).dados);
  const mx=s=>s.reduce((a,r)=>r.atualizado_em>a?r.atualizado_em:a,'');lastCat=mx(cat||[]);lastOrd=mx(ords);
  for(const r of est){if(EKEYS.includes(r.chave)){DB[r.chave]=r.dados;SNAP.e[r.chave]=canon(r.dados)}}
+ if(A)await cliInit(est);
  try{const nums=DB.orders.map(o=>+String(o.code||'').replace(/\D/g,'')||0);DB.sequence=Math.max(DB.sequence||0,...nums,0)}catch(e){}
  _origSave();schedulePush();softRender()}
 async function push(){if(!SNAP||pushing||!sess)return;pushing=true;try{const m=curMaps();
@@ -3050,6 +3118,7 @@ async function push(){if(!SNAP||pushing||!sess)return;pushing=true;try{const m=c
   if(id in SNAP.o){await rest('k10_pedidos?id=eq.'+id,{method:'PATCH',body:{status:r.status,total:r.total,dados:r.dados},prefer:'return=minimal'})}
   else if(isAdmin()){await rest('k10_pedidos',{method:'POST',body:r,prefer:'return=minimal'})}else continue;SNAP.o[id]=j}
  if(isAdmin())for(const id of Object.keys(SNAP.o))if(!m.o[id]){await rest('k10_pedidos?id=eq.'+id,{method:'DELETE'});delete SNAP.o[id]}
+ if(isAdmin())await cliPush();
  setNet(true)}catch(e){console.warn('push',e.message);setNet(false,e);if(e.status===401)setSess(null);clearTimeout(pushT);pushT=setTimeout(push,15000)}finally{pushing=false}}
 async function pull(){if(!SNAP||!sess||pushing)return;try{let ch=false;
  const cat=isAdmin()?await rest('k10_catalogo?select=id,tipo,publico,privado,atualizado_em'+(lastCat?'&atualizado_em=gt.'+encodeURIComponent(lastCat):'')):[];
@@ -3058,6 +3127,7 @@ async function pull(){if(!SNAP||!sess||pushing)return;try{let ch=false;
  for(const r of ords){if(r.atualizado_em>lastOrd)lastOrd=r.atualizado_em;const loc=DB.orders.find(o=>o.id===r.id),j=canon(orderRow(r.dados).dados);if(loc&&canon(orderRow(loc).dados)!==SNAP.o[r.id])continue;
   const o=r.dados;o.id=r.id;if(loc){if(canon(orderRow(loc).dados)!==j){Object.keys(loc).forEach(k=>delete loc[k]);Object.assign(loc,o);ch=true}}else{DB.orders.unshift(o);novos++;ch=true}SNAP.o[r.id]=j}
  if(isAdmin()){const est=await rest('k10_estado?select=chave,dados');for(const r of est){if(!EKEYS.includes(r.chave))continue;const j=canon(r.dados);if(canon(DB[r.chave])===j){SNAP.e[r.chave]=j;continue}if(canon(DB[r.chave])!==SNAP.e[r.chave])continue;DB[r.chave]=r.dados;SNAP.e[r.chave]=j;ch=true}}
+ if(isAdmin()&&await cliPull())ch=true;
  setNet(true);if(ch){DB.orders.sort((a,b)=>String(b.dateKey||'').localeCompare(String(a.dateKey||''))||0);_origSave();softRender()}
  if(novos){toast('🔔 '+(novos>1?novos+' pedidos novos':'Pedido novo')+' chegou!');try{navigator.vibrate&&navigator.vibrate([200,100,200])}catch(e){}}
  }catch(e){console.warn('pull',e.message);setNet(false,e);if(e.status===401){setSess(null);stopStaff();forceLogout()}}}
@@ -3069,6 +3139,47 @@ async function startStaff(){if(running||!sess)return;running=true;try{role=await
 function stopStaff(){running=false;SNAP=null;clearInterval(pullT);clearTimeout(pushT)}
 function forceLogout(){if(DB.activeUser){DB.activeUser=null;_origSave();try{go('staff')}catch(e){softRender()}}}
 window.K10_SB_API.push=push;window.K10_SB_API.pull=pull;
+/* v46 · clientes no banco online (tabela k10_clientes): o portal lê, aprova e cria senha nova */
+const CLI_SEL='k10_clientes?select=id,codigo,telefone,doc,conta,dados,criado_em,atualizado_em',CK='k10-cli-known';
+let cliOn=false,lastCli='',cliN=0;
+function cliOf(r){const d=Object.assign({},r.dados||{});delete d.passHash;delete d._tok;d.id=r.id;d.code=r.codigo;d.phone=d.phone||r.telefone;d.doc=r.doc||d.doc||'';d.account=!!r.conta;
+ if(!d.status)d.status='pendente';if(!d.created&&r.criado_em)d.created=new Date(r.criado_em).toLocaleString('pt-BR');return d}
+const cliKey=c=>{const d=clone(c||{});delete d.passHash;delete d._sb;return canon(d)};
+const onlyNum=s=>String(s||'').replace(/\D/g,'');
+async function cliAll(){let out=[],off=0;for(;;){const r=await rest(CLI_SEL+'&order=codigo.asc&limit=1000&offset='+off);out=out.concat(r||[]);if(!r||r.length<1000)break;off+=1000}return out}
+async function cliInit(est){try{const rows=await cliAll();SNAP.k={};const known=new Set(LS.get(CK,[])),map=new Map(),tels=new Set();
+  for(const r of rows){const c=cliOf(r);map.set(c.id,c);tels.add(String(r.telefone));SNAP.k[c.id]=cliKey(c)}
+  const cur=DB.customers||[],old=(est||[]).find(r=>r.chave==='customers');
+  const local=cur.concat(old&&Array.isArray(old.dados)?old.dados.filter(x=>x&&!cur.some(y=>y.id===x.id)):[]);
+  const keep=[];for(const c of local){if(!c||!c.id||map.has(c.id)||known.has(c.id))continue;const t=onlyNum(c.phone);if(t&&tels.has(t))continue;keep.push(c)}
+  DB.customers=[...map.values(),...keep];lastCli=rows.reduce((a,r)=>r.atualizado_em>a?r.atualizado_em:a,'');LS.set(CK,[...map.keys()]);cliOn=true;
+  if(old)rest('k10_estado?chave=eq.customers',{method:'DELETE'}).catch(()=>{});return true}
+ catch(e){console.warn('clientes',e.message);cliOn=false;if(isAdmin())toast('Não consegui ler os clientes do banco: '+e.message,true);return false}}
+async function cliPush(){if(!cliOn||!SNAP||!SNAP.k)return;try{
+ for(const c of (DB.customers||[]).slice()){if(!c||!c.id)continue;const j=cliKey(c);if(SNAP.k[c.id]===j)continue;const d=clone(c);delete d.passHash;delete d._sb;delete d._tok;
+  if(c.id in SNAP.k){await rest('k10_clientes?id=eq.'+encodeURIComponent(c.id),{method:'PATCH',body:{dados:d},prefer:'return=minimal'});SNAP.k[c.id]=j;continue}
+  const tel=onlyNum(c.phone);if(tel.length<10||tel.length>13)continue;
+  try{const r=await rest('k10_clientes?select=id,codigo',{method:'POST',body:{id:c.id,telefone:tel,doc:onlyNum(c.doc)||null,dados:d},prefer:'return=representation'});
+   const row=r&&r[0];if(row&&row.codigo)c.code=row.codigo;c.account=false;SNAP.k[c.id]=cliKey(c);LS.set(CK,Object.keys(SNAP.k));_origSave()}
+  catch(e){if(e.status===409){DB.customers=DB.customers.filter(x=>x!==c);cliN=9;_origSave();continue}throw e}}
+ }catch(e){console.warn('clientes push',e.message)}}
+async function cliPull(){if(!cliOn){if(++cliN%10===0)return await cliInit([]);return false}
+ try{cliN++;const full=cliN%10===0||!lastCli;const rows=full?await cliAll():await rest(CLI_SEL+'&atualizado_em=gt.'+encodeURIComponent(lastCli)+'&order=atualizado_em.asc');
+  let ch=false;const seen=new Set();
+  for(const r of rows){seen.add(r.id);if(r.atualizado_em>lastCli)lastCli=r.atualizado_em;const c=cliOf(r),j=cliKey(c),loc=DB.customers.find(x=>x.id===c.id);
+   if(loc&&(c.id in SNAP.k)&&cliKey(loc)!==SNAP.k[c.id])continue;
+   if(!loc){DB.customers.push(c);ch=true}else if(cliKey(loc)!==j){for(const k of Object.keys(loc))delete loc[k];Object.assign(loc,c);ch=true}SNAP.k[c.id]=j}
+  if(full)for(const id of Object.keys(SNAP.k))if(!seen.has(id)){const i=DB.customers.findIndex(x=>x.id===id);if(i>=0){DB.customers.splice(i,1);ch=true}delete SNAP.k[id]}
+  if(ch||full)LS.set(CK,Object.keys(SNAP.k));return ch}
+ catch(e){console.warn('clientes',e.message);return false}}
+staffCustomers=function(){ensureCodes();const rows=DB.customers.slice().sort((a,b)=>(a.code||0)-(b.code||0));const contas=rows.filter(c=>c.account).length,pend=rows.filter(c=>c.status!=='aprovado').length;
+ return `<div class="page-title"><h2>👥 Clientes</h2><p>${rows.length} clientes · ${contas} com conta · ${pend} aguardando aprovação. A lista vem do banco online e atualiza sozinha.</p></div>${!cliOn&&isAdmin()?notice('⚠️ Não consegui ler a tabela <b>k10_clientes</b> do banco. Confira se a parte 3 do SQL foi rodada no Supabase.','red'):''}
+ <section class="panel"><div class="table-wrap"><table class="data-table"><tr><th>Nº</th><th>Cliente</th><th>Tipo</th><th>CPF/CNPJ</th><th>Contato</th><th>Endereço</th><th>Cadastro</th><th>Status</th><th>Ação K10</th></tr>${rows.map(c=>`<tr><td><b>${esc(c.code||'')}</b></td><td>${esc(c.name||'')}</td><td>${c.account?'<span class="pill ok">Conta</span>':'<span class="pill">Pedido</span>'}</td><td>${c.account?esc(maskDoc(c.doc||'')):'—'}</td><td>${esc(c.phone||'')}</td><td>${esc([c.street,c.number,c.neighborhood].filter(Boolean).join(', '))}</td><td class="tiny">${esc(c.created||'')}</td><td><span class="pill ${c.status==='aprovado'?'ok':'warning'}">${esc(c.status||'pendente')}</span></td><td>${c.status!=='aprovado'?button('Aprovar','approve-customer','mini-btn',`data-id="${esc(c.id)}"`):'✓'} ${c.account&&cliOn?`<button type="button" class="mini-btn" data-clipass="${esc(c.id)}">Nova senha</button>`:''}</td></tr>`).join('')||'<tr><td colspan="9" class="muted">Nenhum cliente ainda.</td></tr>'}</table></div></section>`};
+document.addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-clipass]');if(!b)return;e.preventDefault();e.stopImmediatePropagation();const c=DB.customers.find(x=>x.id===b.dataset.clipass);if(!c)return;
+ popup('Nova senha · '+(c.name||'Cliente'),`<form id="cliPassForm" class="stack"><input type="hidden" name="cid" value="${esc(c.id)}"><p class="tiny muted">Cliente nº ${esc(c.code||'')} · ${esc(c.phone||'')}. Crie uma senha provisória e mande para o cliente pelo WhatsApp. Ele pode trocar depois em Configurações.</p><label class="field">Senha nova (mín. 6)<input name="pass" required minlength="6" autocomplete="off"></label><button class="button block" type="submit">Salvar senha nova</button></form>`)},true);
+window.addEventListener('submit',async e=>{const f=e.target;if(!f||f.getAttribute('id')!=='cliPassForm')return;e.preventDefault();e.stopImmediatePropagation();const id=f.querySelector("[name=cid]").value,pw=String(f.querySelector('[name=pass]').value||'').trim();
+ if(pw.length<6){toast('A senha precisa ter pelo menos 6 caracteres.',true);return}
+ try{await rest('rpc/k10_admin_senha_cliente',{method:'POST',body:{cliente_id:id,nova:pw}});closeModal();toast('Senha nova salva. Avise o cliente pelo WhatsApp.')}catch(err){toast(err.message,true)}},true);
 /* login da equipe: confere no Supabase e depois segue o login normal do app */
 window.addEventListener('submit',async e=>{const f=e.target;if(!f||f.id!=='staffLoginForm')return;if(f.dataset.sbok==='1'){delete f.dataset.sbok;return}
  const lock=LS.get('k10-staff-lock',null);if(lock&&+lock.until>Date.now())return;
